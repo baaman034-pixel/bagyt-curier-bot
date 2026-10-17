@@ -3,15 +3,17 @@ import telebot
 from flask import Flask
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
+from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-v3")
+geolocator = Nominatim(user_agent="bagyt-express-v5")
 DEFAULT_FROM = "Дордой мир обуви"
+BRAND = "Bagyt Express"
 
 couriers = set()
-active_orders = [] # храним заказы для проверки 10 мин
+active_orders = []
 
 def get_coords(addr):
     try:
@@ -28,38 +30,29 @@ def normalize_phone(p):
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 BAGYT\n📦 {DEFAULT_FROM}\n\nТы: отправь фото + адрес в подписи\nКурьер: включи трансляцию геопозиции")
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\nСклад: отправь фото + адрес\nКурьер: включи трансляцию")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
     couriers.add(m.chat.id)
     if not m.location: return
-    
     cur_pos = (m.location.latitude, m.location.longitude)
-    
-    # Проверяем все активные заказы
     for order in active_orders:
         if order.get('notified'): continue
         if not order.get('coords'): continue
-        
         dist = geodesic(cur_pos, order['coords']).km
-        # если меньше 1.5 км = примерно 10 мин по Бишкеку
         if dist < 1.5:
             phone_norm = normalize_phone(order['phone'])
-            text = f"Здравствуйте! Курьер Bagyt будет у вас через 10 минут 📦 по адресу {order['dest']}"
+            text = f"Здравствуйте! Ваш курьер {BRAND} уже близко, будет через 10 минут по адресу {order['dest']}. Пожалуйста будьте на связи 📦"
             wa_link = f"https://wa.me/{phone_norm}?text={urllib.parse.quote(text)}"
             
-            msg = (
-                f"⏰ КУРЬЕР В 10 МИНУТАХ!\n"
-                f"📍 {order['dest']}\n"
-                f"📞 {order['phone']}\n"
-                f"📏 Осталось {dist:.2f} км\n\n"
-                f"Нажми чтобы написать клиенту в WhatsApp:\n"
-                f"👉 {wa_link}"
-            )
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(f"📲 Написать клиенту в WhatsApp", url=wa_link))
+            
+            msg = f"⏰ КУРЬЕР В 10 МИНУТАХ!\n📍 {order['dest']}\n📞 {order['phone']}\n📏 {dist:.2f} км"
             try:
-                bot.send_message(order['chat_id'], msg)
-                bot.send_message(m.chat.id, f"Ты рядом с клиентом!\n{msg}")
+                bot.send_message(order['chat_id'], msg, reply_markup=markup)
+                bot.send_message(m.chat.id, f"Ты рядом!\n{msg}", reply_markup=markup)
                 order['notified'] = True
             except: pass
 
@@ -67,19 +60,14 @@ def handle_loc(m):
 def handle_photo(m):
     cap = (m.caption or "").strip()
     if not cap:
-        bot.send_message(m.chat.id, "Добавь адрес в подпись к фото"); return
+        bot.send_message(m.chat.id, "Добавь адрес в подпись"); return
     fid = m.photo[-1].file_id
     p = cap.rsplit(' ', 1)
     dest, phone = (p[0], p[1]) if len(p)==2 else (cap, "клиент")
-    
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
     
-    phone_norm = normalize_phone(phone)
-    wa_link = f"https://wa.me/{phone_norm}?text={urllib.parse.quote(f'Здравствуйте! Ваш заказ из {DEFAULT_FROM} принят ✅ Едет по адресу {dest}')}"
-    
-    bot.send_message(m.chat.id, f"✅ Заказ с фото принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}\n\nСразу написать клиенту:\n👉 {wa_link}")
-    
+    bot.send_message(m.chat.id, f"✅ Заказ принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}")
     for cid in list(couriers):
         if cid == m.chat.id: continue
         try: bot.send_photo(cid, fid, caption=f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
@@ -94,18 +82,14 @@ def handle_text(m):
         dest, phone = (p[0], p[1]) if len(p)==2 else (line.strip(), "клиент")
         coords = get_coords(dest)
         active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-        
-        phone_norm = normalize_phone(phone)
-        wa_link = f"https://wa.me/{phone_norm}?text={urllib.parse.quote(f'Здравствуйте! Ваш заказ из {DEFAULT_FROM} принят ✅')}"
-        bot.send_message(m.chat.id, f"✅ Принят: {dest} {phone}\n👉 WhatsApp: {wa_link}")
-        
+        bot.send_message(m.chat.id, f"✅ Принят: {dest} {phone}")
         for cid in list(couriers):
             if cid == m.chat.id: continue
             try: bot.send_message(cid, f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
             except: couriers.discard(cid)
 
 @app.route('/')
-def home(): return f"BAGYT LIVE {len(active_orders)} orders"
+def home(): return f"BAGYT EXPRESS LIVE {len(active_orders)}"
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
     while True:
