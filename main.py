@@ -5,12 +5,14 @@ from geopy.distance import geodesic
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# ФИКС: ключ прямо в коде, если нет в Environment
 DGIS_KEY = os.environ.get("DGIS_API_KEY") or "47f4a193-a03c-4af0-8cbc-894fd6ddc6ad"
 YANDEX_KEY = os.environ.get("YANDEX_API_KEY")
 
-print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
-print(f"DGIS_KEY exists: {bool(DGIS_KEY)} len={len(DGIS_KEY) if DGIS_KEY else 0}")
-print(f"YANDEX_KEY exists: {bool(YANDEX_KEY)}")
+print(f"=== BAGYT START ===")
+print(f"BOT_TOKEN: {bool(BOT_TOKEN)}")
+print(f"DGIS_KEY: {bool(DGIS_KEY)} -> {DGIS_KEY[:8]}...")
+print(f"===================")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -20,22 +22,23 @@ couriers = set()
 active_orders = []
 
 def get_coords(addr):
-    addr = addr.replace("Улица ","").strip()
-    if DGIS_KEY:
-        try:
-            url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={addr}, Бишкек&key={DGIS_KEY}&fields=items.point"
-            print(f"2GIS try: {addr}")
-            r = requests.get(url, timeout=10).json()
-            items = r.get('result', {}).get('items', [])
-            if items and 'point' in items[0]:
-                lat = items[0]['point']['lat']
-                lon = items[0]['point']['lon']
-                print(f"2GIS found: {lat},{lon}")
-                return (lat, lon)
-            else:
-                print(f"2GIS no items: {r}")
-        except Exception as e:
-            print(f"2GIS error: {e}")
+    addr = addr.replace("Улица ","").replace("улица ","").strip()
+    if not DGIS_KEY:
+        print("No DGIS key!")
+        return None
+    try:
+        url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={addr}, Бишкек&key={DGIS_KEY}&fields=items.point"
+        print(f"2GIS search: {addr}")
+        r = requests.get(url, timeout=15).json()
+        print(f"2GIS response: {r.get('result',{}).get('items',[{}])[0] if r.get('result',{}).get('items') else 'empty'}")
+        items = r.get('result', {}).get('items', [])
+        if items and 'point' in items[0]:
+            lat = items[0]['point']['lat']
+            lon = items[0]['point']['lon']
+            print(f"FOUND: {lat},{lon}")
+            return (lat, lon)
+    except Exception as e:
+        print(f"2GIS error: {e}")
     return None
 
 def parse_order(text):
@@ -53,7 +56,8 @@ def normalize_phone(p):
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\n✅ Работает БЕЗ ФОТО!\n\nПросто напиши:\n`Улица Дом Телефон`\nПример: Ибраимова 3 0554950070\n\nИли с фото: фото + адрес в подписи\nDGIS: {'✅ подключен' if DGIS_KEY else '❌ нет ключа'}")
+    has = "✅ подключен" if DGIS_KEY else "❌ нет"
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\n✅ Работает БЕЗ ФОТО!\nПросто: Улица Дом Телефон\nПример: Ибраимова 3 0554950070\n\nИли с фото: фото + адрес\nDGIS: {has}")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
@@ -80,11 +84,11 @@ def handle_loc(m):
 def handle_photo(m):
     cap = (m.caption or "").strip()
     if not cap:
-        bot.send_message(m.chat.id, "Добавь адрес в подпись: Адрес Телефон"); return
+        bot.send_message(m.chat.id, "Добавь адрес: Адрес Телефон"); return
     dest, phone = parse_order(cap)
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    st = "📍 Координаты найдены" if coords else f"⚠️ Не найдено (ключ есть: {bool(DGIS_KEY)})"
+    st = "📍 Найдено ✅" if coords else "⚠️ Не найдено"
     bot.send_message(m.chat.id, f"✅ Фото-заказ\n📦 {dest}\n📞 {phone}\n{st}")
 
 @bot.message_handler(content_types=['text'])
@@ -94,7 +98,7 @@ def handle_text(m):
     if len(dest) < 3: return
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    st = "📍 Найдено ✅" if coords else f"⚠️ Коорд. не найдены. Ключ 2ГИС: {'ЕСТЬ' if DGIS_KEY else 'НЕТ ❌'}"
+    st = "📍 Найдено ✅" if coords else f"⚠️ Не найдено. Ключ: {DGIS_KEY[:8] if DGIS_KEY else 'НЕТ'}"
     bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}")
     for cid in list(couriers):
         if cid==m.chat.id: continue
@@ -102,13 +106,12 @@ def handle_text(m):
         except: couriers.discard(cid)
 
 @app.route('/')
-def home(): return f"BAGYT V10 {len(active_orders)} DGIS={'YES' if DGIS_KEY else 'NO'}"
+def home(): return f"BAGYT V11 {len(active_orders)} DGIS={'YES' if DGIS_KEY else 'NO'}"
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
     while True:
         try: bot.infinity_polling(timeout=60)
-        except Exception as e:
-            print(f"Polling error {e}")
+        except Exception as e: print(f"Polling error {e}")
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
