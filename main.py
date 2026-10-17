@@ -1,95 +1,113 @@
-import os, threading, urllib.parse
+import os, threading, urllib.parse, requests
 import telebot
 from flask import Flask
-from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DGIS_KEY = os.environ.get("DGIS_API_KEY")
+YANDEX_KEY = os.environ.get("YANDEX_API_KEY")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-express-v5")
 DEFAULT_FROM = "Дордой мир обуви"
 BRAND = "Bagyt Express"
-
 couriers = set()
 active_orders = []
 
 def get_coords(addr):
-    try:
-        loc = geolocator.geocode(f"{addr}, Бишкек, Кыргызстан", timeout=10)
-        if loc: return (loc.latitude, loc.longitude)
-    except: pass
+    # 2GIS
+    if DGIS_KEY:
+        try:
+            url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={addr}, Бишкек&key={DGIS_KEY}&fields=items.point"
+            r = requests.get(url, timeout=10).json()
+            items = r.get('result', {}).get('items', [])
+            if items and 'point' in items[0]:
+                return (items[0]['point']['lat'], items[0]['point']['lon'])
+        except Exception as e:
+            print("2GIS err", e)
+    # Yandex fallback
+    if YANDEX_KEY:
+        try:
+            url = f"https://geocode-maps.yandex.ru/1.x/?apikey={YANDEX_KEY}&geocode=Бишкек, {addr}&format=json"
+            r = requests.get(url, timeout=10).json()
+            pos = r['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
+            lon, lat = map(float, pos.split())
+            return (lat, lon)
+        except: pass
     return None
 
+def parse_order(text):
+    text = text.strip()
+    # отделяем телефон в конце
+    parts = text.rsplit(' ', 1)
+    if len(parts) == 2 and len(''.join(filter(str.isdigit, parts[1]))) >= 9:
+        return parts[0].strip(), parts[1].strip()
+    return text, "клиент"
+
 def normalize_phone(p):
-    digits = ''.join(filter(str.isdigit, p))
-    if digits.startswith('0'): digits = '996' + digits[1:]
-    if not digits.startswith('996'): digits = '996' + digits
-    return digits
+    d = ''.join(filter(str.isdigit, p))
+    if d.startswith('0'): d = '996' + d[1:]
+    if not d.startswith('996'): d = '996' + d
+    return d
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\nСклад: отправь фото + адрес\nКурьер: включи трансляцию")
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\n✅ Теперь можно БЕЗ ФОТО!\n\nПросто напиши:\n`Улица Дом Телефон`\n\nПример:\nИбраимова 3 0554950070\n\nИли с фото: отправь фото + адрес в подписи")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
     couriers.add(m.chat.id)
     if not m.location: return
-    cur_pos = (m.location.latitude, m.location.longitude)
+    cur = (m.location.latitude, m.location.longitude)
     for order in active_orders:
-        if order.get('notified'): continue
-        if not order.get('coords'): continue
-        dist = geodesic(cur_pos, order['coords']).km
+        if order.get('notified') or not order.get('coords'): continue
+        dist = geodesic(cur, order['coords']).km
         if dist < 1.5:
-            phone_norm = normalize_phone(order['phone'])
-            text = f"Здравствуйте! Ваш курьер {BRAND} уже близко, будет через 10 минут по адресу {order['dest']}. Пожалуйста будьте на связи 📦"
-            wa_link = f"https://wa.me/{phone_norm}?text={urllib.parse.quote(text)}"
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(f"📲 Написать клиенту в WhatsApp", url=wa_link))
-            
-            msg = f"⏰ КУРЬЕР В 10 МИНУТАХ!\n📍 {order['dest']}\n📞 {order['phone']}\n📏 {dist:.2f} км"
+            pn = normalize_phone(order['phone'])
+            txt = f"Здравствуйте! Курьер {BRAND} уже близко, будет через 10 мин по адресу {order['dest']}. Будьте на связи 📦"
+            wa = f"https://wa.me/{pn}?text={urllib.parse.quote(txt)}"
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("📲 WhatsApp клиенту", url=wa))
+            msg = f"⏰ 10 МИНУТ!\n📍 {order['dest']}\n📞 {order['phone']}\n📏 {dist:.2f} км"
             try:
-                bot.send_message(order['chat_id'], msg, reply_markup=markup)
-                bot.send_message(m.chat.id, f"Ты рядом!\n{msg}", reply_markup=markup)
-                order['notified'] = True
+                bot.send_message(order['chat_id'], msg, reply_markup=kb)
+                bot.send_message(m.chat.id, f"Ты рядом!\n{msg}", reply_markup=kb)
+                order['notified']=True
             except: pass
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
     cap = (m.caption or "").strip()
     if not cap:
-        bot.send_message(m.chat.id, "Добавь адрес в подпись"); return
-    fid = m.photo[-1].file_id
-    p = cap.rsplit(' ', 1)
-    dest, phone = (p[0], p[1]) if len(p)==2 else (cap, "клиент")
+        bot.send_message(m.chat.id, "Добавь адрес в подпись: Адрес Телефон"); return
+    dest, phone = parse_order(cap)
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    
-    bot.send_message(m.chat.id, f"✅ Заказ принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}")
+    st = "📍 Координаты найдены" if coords else "⚠️ Координаты не найдены - проверь ключ 2ГИС"
+    bot.send_message(m.chat.id, f"✅ Фото-заказ\n📦 {dest}\n📞 {phone}\n{st}")
     for cid in list(couriers):
-        if cid == m.chat.id: continue
-        try: bot.send_photo(cid, fid, caption=f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
+        if cid==m.chat.id: continue
+        try: bot.send_photo(cid, m.photo[-1].file_id, caption=f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
         except: couriers.discard(cid)
 
+# ЭТО ТВОЯ ПРОСЬБА - БЕЗ ФОТО, ПРОСТО ТЕКСТ
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
     if not m.text or m.text.startswith('/'): return
-    for line in m.text.split('\n'):
-        if not line.strip(): continue
-        p = line.strip().rsplit(' ', 1)
-        dest, phone = (p[0], p[1]) if len(p)==2 else (line.strip(), "клиент")
-        coords = get_coords(dest)
-        active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-        bot.send_message(m.chat.id, f"✅ Принят: {dest} {phone}")
-        for cid in list(couriers):
-            if cid == m.chat.id: continue
-            try: bot.send_message(cid, f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
-            except: couriers.discard(cid)
+    dest, phone = parse_order(m.text.strip())
+    if len(dest) < 3: return
+    coords = get_coords(dest)
+    active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
+    st = "📍 Найдено" if coords else "⚠️ Ключ 2ГИС не подключен"
+    bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}")
+    for cid in list(couriers):
+        if cid==m.chat.id: continue
+        try: bot.send_message(cid, f"🔥 ЗАКАЗ (текст)\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
+        except: couriers.discard(cid)
 
 @app.route('/')
-def home(): return f"BAGYT EXPRESS LIVE {len(active_orders)}"
+def home(): return f"BAGYT V9 text+photo {len(active_orders)}"
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
     while True:
