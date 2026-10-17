@@ -8,6 +8,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DGIS_KEY = os.environ.get("DGIS_API_KEY")
 YANDEX_KEY = os.environ.get("YANDEX_API_KEY")
 
+print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
+print(f"DGIS_KEY exists: {bool(DGIS_KEY)} len={len(DGIS_KEY) if DGIS_KEY else 0}")
+print(f"YANDEX_KEY exists: {bool(YANDEX_KEY)}")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 DEFAULT_FROM = "Дордой мир обуви"
@@ -16,30 +20,26 @@ couriers = set()
 active_orders = []
 
 def get_coords(addr):
-    # 2GIS
+    addr = addr.replace("Улица ","").strip()
     if DGIS_KEY:
         try:
             url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={addr}, Бишкек&key={DGIS_KEY}&fields=items.point"
+            print(f"2GIS try: {addr}")
             r = requests.get(url, timeout=10).json()
             items = r.get('result', {}).get('items', [])
             if items and 'point' in items[0]:
-                return (items[0]['point']['lat'], items[0]['point']['lon'])
+                lat = items[0]['point']['lat']
+                lon = items[0]['point']['lon']
+                print(f"2GIS found: {lat},{lon}")
+                return (lat, lon)
+            else:
+                print(f"2GIS no items: {r}")
         except Exception as e:
-            print("2GIS err", e)
-    # Yandex fallback
-    if YANDEX_KEY:
-        try:
-            url = f"https://geocode-maps.yandex.ru/1.x/?apikey={YANDEX_KEY}&geocode=Бишкек, {addr}&format=json"
-            r = requests.get(url, timeout=10).json()
-            pos = r['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
-            lon, lat = map(float, pos.split())
-            return (lat, lon)
-        except: pass
+            print(f"2GIS error: {e}")
     return None
 
 def parse_order(text):
     text = text.strip()
-    # отделяем телефон в конце
     parts = text.rsplit(' ', 1)
     if len(parts) == 2 and len(''.join(filter(str.isdigit, parts[1]))) >= 9:
         return parts[0].strip(), parts[1].strip()
@@ -53,7 +53,7 @@ def normalize_phone(p):
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\n✅ Теперь можно БЕЗ ФОТО!\n\nПросто напиши:\n`Улица Дом Телефон`\n\nПример:\nИбраимова 3 0554950070\n\nИли с фото: отправь фото + адрес в подписи")
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\n✅ Работает БЕЗ ФОТО!\n\nПросто напиши:\n`Улица Дом Телефон`\nПример: Ибраимова 3 0554950070\n\nИли с фото: фото + адрес в подписи\nDGIS: {'✅ подключен' if DGIS_KEY else '❌ нет ключа'}")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
@@ -84,14 +84,9 @@ def handle_photo(m):
     dest, phone = parse_order(cap)
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    st = "📍 Координаты найдены" if coords else "⚠️ Координаты не найдены - проверь ключ 2ГИС"
+    st = "📍 Координаты найдены" if coords else f"⚠️ Не найдено (ключ есть: {bool(DGIS_KEY)})"
     bot.send_message(m.chat.id, f"✅ Фото-заказ\n📦 {dest}\n📞 {phone}\n{st}")
-    for cid in list(couriers):
-        if cid==m.chat.id: continue
-        try: bot.send_photo(cid, m.photo[-1].file_id, caption=f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
-        except: couriers.discard(cid)
 
-# ЭТО ТВОЯ ПРОСЬБА - БЕЗ ФОТО, ПРОСТО ТЕКСТ
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
     if not m.text or m.text.startswith('/'): return
@@ -99,7 +94,7 @@ def handle_text(m):
     if len(dest) < 3: return
     coords = get_coords(dest)
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    st = "📍 Найдено" if coords else "⚠️ Ключ 2ГИС не подключен"
+    st = "📍 Найдено ✅" if coords else f"⚠️ Коорд. не найдены. Ключ 2ГИС: {'ЕСТЬ' if DGIS_KEY else 'НЕТ ❌'}"
     bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}")
     for cid in list(couriers):
         if cid==m.chat.id: continue
@@ -107,12 +102,14 @@ def handle_text(m):
         except: couriers.discard(cid)
 
 @app.route('/')
-def home(): return f"BAGYT V9 text+photo {len(active_orders)}"
+def home(): return f"BAGYT V10 {len(active_orders)} DGIS={'YES' if DGIS_KEY else 'NO'}"
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
     while True:
         try: bot.infinity_polling(timeout=60)
-        except: pass
+        except Exception as e:
+            print(f"Polling error {e}")
+
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
