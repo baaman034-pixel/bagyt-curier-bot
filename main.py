@@ -5,7 +5,7 @@ from geopy.distance import geodesic
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DGIS_KEY = os.environ.get("DGIS_API_KEY")
+DGIS_KEY = os.environ.get("DGIS_API_KEY") or "47f4a193-a03c-4af0-8cbc-894fd6ddc6ad"
 YANDEX_KEY = os.environ.get("YANDEX_API_KEY")
 
 print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
