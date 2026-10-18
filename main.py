@@ -78,6 +78,17 @@ def handle_text(m):
     coords = get_coords(dest)
     active_orders.append({'dest':dest,'phone':phone,'coords':coords,'chat_id':m.chat.id,'notified':False})
     st = "📍 Найдено ✅" if coords else "⚠️ Не найдено"
+    
+    # СРАЗУ проверяем расстояние, даже если ты и курьер - один человек
+    if coords and couriers:
+        for cid, cpos in couriers.items():
+            d = geodesic(cpos, coords).km
+            bot.send_message(m.chat.id, f"📏 До {dest}: {d:.2f} км от твоей последней точки")
+            check_nearby_orders(cid, cpos)
+    else:
+        bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}\n⚠️ Нет позиции курьера. Включи трансляцию заново.")
+        return
+        
     bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}")
     
     # СРАЗУ проверяем если курьер уже рядом
