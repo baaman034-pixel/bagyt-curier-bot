@@ -1,114 +1,84 @@
-import os, threading, urllib.parse, requests
+import os, threading, urllib.parse
 import telebot
 from flask import Flask
+from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DGIS_KEY = os.environ.get("DGIS_API_KEY") or "47f4a193-a03c-4af0-8cbc-894fd6ddc6ad"
-
-print(f"DGIS_KEY OK: {bool(DGIS_KEY)}")
-
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
+geolocator = Nominatim(user_agent="bagyt-express-v5")
 DEFAULT_FROM = "Дордой мир обуви"
 BRAND = "Bagyt Express"
 
-couriers = {}  # chat_id -> (lat,lon)
+couriers = set()
 active_orders = []
 
 def get_coords(addr):
-    addr = addr.replace("Улица ","").replace("улица ","").strip()
     try:
-        url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={addr}, Бишкек&key={DGIS_KEY}&fields=items.point"
-        r = requests.get(url, timeout=15).json()
-        items = r.get('result', {}).get('items', [])
-        if items and 'point' in items[0]:
-            return (items[0]['point']['lat'], items[0]['point']['lon'])
-    except Exception as e:
-        print(f"2GIS err {e}")
+        loc = geolocator.geocode(f"{addr}, Ош, Кыргызстан", timeout=10)
+        if loc: return (loc.latitude, loc.longitude)
+    except: pass
     return None
 
-def parse_order(text):
-    parts = text.strip().rsplit(' ', 1)
-    if len(parts)==2 and len(''.join(filter(str.isdigit, parts[1])))>=9:
-        return parts[0].strip(), parts[1].strip()
-    return text.strip(), "клиент"
-
 def normalize_phone(p):
-    d=''.join(filter(str.isdigit,p))
-    if d.startswith('0'): d='996'+d[1:]
-    if not d.startswith('996'): d='996'+d
-    return d
-
-def check_nearby_orders(courier_id, courier_pos):
-    for order in active_orders:
-        if order.get('notified') or not order.get('coords'): continue
-        dist = geodesic(courier_pos, order['coords']).km
-        if dist < 1.5:
-            pn = normalize_phone(order['phone'])
-            txt = f"Здравствуйте! Курьер {BRAND} уже близко, будет через 10 мин по адресу {order['dest']}. Будьте на связи 📦"
-            wa = f"https://wa.me/{pn}?text={urllib.parse.quote(txt)}"
-            kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("📲 WhatsApp клиенту", url=wa))
-            msg = f"⏰ 10 МИНУТ!\n📍 {order['dest']}\n📞 {order['phone']}\n📏 {dist:.2f} км от тебя"
-            try:
-                bot.send_message(order['chat_id'], msg, reply_markup=kb)
-                bot.send_message(courier_id, f"Ты рядом с клиентом!\n{msg}", reply_markup=kb)
-                order['notified']=True
-            except: pass
+    digits = ''.join(filter(str.isdigit, p))
+    if digits.startswith('0'): digits = '996' + digits[1:]
+    if not digits.startswith('996'): digits = '996' + digits
+    return digits
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 {BRAND}\nВключи трансляцию геопозиции тут в боте и получай уведомления за 1.5 км\nЗаказ: Адрес Телефон")
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
+    couriers.add(m.chat.id)
     if not m.location: return
-    cur = (m.location.latitude, m.location.longitude)
-    couriers[m.chat.id]=cur
-    print(f"Courier {m.chat.id} at {cur}")
-    check_nearby_orders(m.chat.id, cur)
+    cur_pos = (m.location.latitude, m.location.longitude)
+    for order in active_orders:
+        if order.get('notified'): continue
+        if not order.get('coords'): continue
+        dist = geodesic(cur_pos, order['coords']).km
+        if dist < 1.5:
+            phone_norm = normalize_phone(order['phone'])
+            text = f"Здравствуйте! Ваш курьер {BRAND} уже близко, будет через 10 минут по адресу {order['dest']}. Пожалуйста будьте на связи 📦"
+            wa_link = f"https://wa.me/{phone_norm}?text={urllib.parse.quote(text)}"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📲 Написать клиенту в WhatsApp", url=wa_link))
+            msg = f"⏰ КУРЬЕР В 10 МИНУТАХ!\n📍 {order['dest']}\n📞 {order['phone']}\n📏 {dist:.2f} км"
+            try:
+                bot.send_message(order['chat_id'], msg, reply_markup=markup)
+                bot.send_message(m.chat.id, f"Ты рядом!\n{msg}", reply_markup=markup)
+                order['notified'] = True
+            except: pass
 
-@bot.message_handler(content_types=['text'])
-def handle_text(m):
-    if not m.text or m.text.startswith('/'): return
-    dest, phone = parse_order(m.text)
-    if len(dest)<3: return
-    coords = get_coords(dest)
-    active_orders.append({'dest':dest,'phone':phone,'coords':coords,'chat_id':m.chat.id,'notified':False})
-    st = "📍 Найдено ✅" if coords else "⚠️ Не найдено"
-    
-    # СРАЗУ проверяем расстояние, даже если ты и курьер - один человек
-    if coords and couriers:
-        for cid, cpos in couriers.items():
-            d = geodesic(cpos, coords).km
-            bot.send_message(m.chat.id, f"📏 До {dest}: {d:.2f} км от твоей последней точки")
-            check_nearby_orders(cid, cpos)
+@bot.message_handler(content_types=['photo','text'])
+def handle_all(m):
+    # общая логика приема заказа - без WhatsApp
+    if m.content_type == 'photo':
+        cap = (m.caption or "").strip()
+        if not cap: return
+        p = cap.rsplit(' ', 1)
+        dest, phone = (p[0], p[1]) if len(p)==2 else (cap, "клиент")
     else:
-        bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}\n⚠️ Нет позиции курьера. Включи трансляцию заново.")
-        return
-        
-    bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{st}")
+        if not m.text or m.text.startswith('/'): return
+        p = m.text.strip().rsplit(' ', 1)
+        dest, phone = (p[0], p[1]) if len(p)==2 else (m.text.strip(), "клиент")
     
-    # СРАЗУ проверяем если курьер уже рядом
-    if coords:
-        for cid, cpos in couriers.items():
-            check_nearby_orders(cid, cpos)
-    
-    for cid in list(couriers.keys()):
-        if cid==m.chat.id: continue
-        try: bot.send_message(cid, f"🔥 НОВЫЙ ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
-        except: couriers.pop(cid, None)
+    coords = get_coords(dest)
+    active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
+    bot.send_message(m.chat.id, f"✅ Заказ принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}")
 
 @app.route('/')
-def home(): return f"BAGYT V12 {len(active_orders)} couriers={len(couriers)}"
+def home(): return f"BAGYT EXPRESS LIVE {len(active_orders)}"
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
     while True:
         try: bot.infinity_polling(timeout=60)
-        except Exception as e: print(f"Poll {e}")
+        except: pass
 
-if __name__=="__main__":
+if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
