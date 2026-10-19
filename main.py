@@ -1,4 +1,4 @@
-import os, threading, urllib.parse, requests
+import os, threading, urllib.parse, requests, re
 import telebot
 from flask import Flask
 from geopy.geocoders import Nominatim
@@ -8,11 +8,10 @@ from telebot import types
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-express-bishkek-2gis")
+geolocator = Nominatim(user_agent="bagyt-express-final")
 DEFAULT_FROM = "Дордой мир обуви"
 BRAND = "Bagyt Express"
-# Твой ключ 2ГИС который мы добавляли
-DGIS_KEY = os.environ.get("DGIS_KEY", "") 
+DGIS_KEY = os.environ.get("DGIS_KEY", "")
 
 couriers = set()
 active_orders = []
@@ -29,10 +28,8 @@ def get_coords_2gis(addr):
     return None
 
 def get_coords(addr):
-    # 1. Сначала пробуем 2ГИС
     c = get_coords_2gis(addr)
     if c: return c
-    # 2. Если нет - OpenStreetMap Бишкек
     try:
         loc = geolocator.geocode(f"{addr}, Бишкек, Кыргызстан", timeout=10)
         if loc: return (loc.latitude, loc.longitude)
@@ -47,7 +44,7 @@ def normalize_phone(p):
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 {BRAND}\n📦 {DEFAULT_FROM}\n\nСклад: отправь адрес + телефон\nКурьер: включи трансляцию")
+    bot.send_message(m.chat.id, f"🚚 {BRAND}\nВключи трансляцию геопозиции тут в боте и получай уведомления за 1.5 км\nЗаказ: Адрес Телефон")
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
@@ -76,11 +73,15 @@ def handle_photo(m):
     cap = (m.caption or "").strip()
     if not cap:
         bot.send_message(m.chat.id, "Добавь адрес в подпись"); return
-    p = cap.rsplit(' ', 1)
-    dest, phone = (p[0], p[1]) if len(p)==2 else (cap, "клиент")
+    phone_match = re.search(r'(\+?996|0)?\s*\d{3}\s*\d{3}\s*\d{3,4}', cap)
+    if not phone_match:
+        bot.send_message(m.chat.id, "Не нашел телефон"); return
+    phone = phone_match.group()
+    dest = cap.replace(phone, '').strip(' -:,')
     coords = get_coords(dest)
+    status = "📍 Найдено ✅" if coords else "📍 Не найдено ⚠️"
     active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-    bot.send_message(m.chat.id, f"✅ Заказ принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}")
+    bot.send_message(m.chat.id, f"✅ Заказ С ФОТО принят\n📦 {dest}\n📞 {phone}\n{status}")
     for cid in list(couriers):
         if cid == m.chat.id: continue
         try: bot.send_photo(cid, m.photo[-1].file_id, caption=f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
@@ -90,12 +91,20 @@ def handle_photo(m):
 def handle_text(m):
     if not m.text or m.text.startswith('/'): return
     for line in m.text.split('\n'):
-        if not line.strip(): continue
-        p = line.strip().rsplit(' ', 1)
-        dest, phone = (p[0], p[1]) if len(p)==2 else (line.strip(), "клиент")
+        line=line.strip()
+        if len(line)<5: continue
+        phone_match = re.search(r'(\+?996|0)?\s*\d{3}\s*\d{3}\s*\d{3,4}', line)
+        if not phone_match: continue
+        phone = phone_match.group()
+        dest = line.replace(phone, '').strip(' -:,')
+        if not dest: continue
         coords = get_coords(dest)
+        status = "📍 Найдено ✅" if coords else "📍 Не найдено ⚠️"
+        # Проверка есть ли курьер онлайн
+        has_courier = len(couriers) > 0
+        warn = "\n⚠️ Нет позиции курьера. Включи трансляцию заново." if not has_courier else ""
         active_orders.append({'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False})
-        bot.send_message(m.chat.id, f"✅ Заказ принят\n📦 {DEFAULT_FROM} -> {dest}\n📞 {phone}")
+        bot.send_message(m.chat.id, f"✅ Заказ БЕЗ ФОТО принят\n📦 {dest}\n📞 {phone}\n{status}{warn}")
         for cid in list(couriers):
             if cid == m.chat.id: continue
             try: bot.send_message(cid, f"🔥 ЗАКАЗ\n{DEFAULT_FROM} -> {dest}\n📞 {phone}")
