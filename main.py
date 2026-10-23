@@ -61,8 +61,8 @@ def handle_loc(m):
             if dist<1.5:
                 pn=normalize_phone(o['phone']) if o.get('phone') else ""
                 if pn:
-                    wa_text=f"Zdravstvuite! Kuryer Bagyt Express budet cherez 10 min {o['dest']}"
-                    wa_link=f"https://wa.me/{pn}?text={urllib.parse.quote(wa_text)}"
+                    wa_text=f"Здравствуйте! Ваш курьер Bagyt Express будет через 10 мин по адресу {o['dest']}. Пожалуйста будьте на связи"
+wa_link=f"https://wa.me/{pn}?text={urllib.parse.quote(wa_text, safe='')}"
                     mk=types.InlineKeyboardMarkup()
                     mk.add(types.InlineKeyboardButton("📲 WhatsApp клиенту", url=wa_link))
                 else:
