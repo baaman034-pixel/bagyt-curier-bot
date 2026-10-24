@@ -10,17 +10,26 @@ DGIS_KEY = os.environ.get("DGIS_KEY", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-bishkek-v19-final")
+geolocator = Nominatim(user_agent="bagyt-bishkek-v20-final")
 
 FILE = "orders.json"
 active_orders = []
-couriers = set()
 
+# 1. ИСПРАВЛЕНИЯ НАЗВАНИЙ
 MANUAL = {
     "биримдик кут": "Максима Горького 1",
     "мир обуви": "Дордой 14",
     "дордой плаза": "Дордой 115",
     "мадина": "Профсоюзная 52",
+}
+
+# 2. ТОЧНЫЕ КООРДИНАТЫ - ЗАПОМНИЛ ТВОИ ОШИБКИ
+MANUAL_COORDS = {
+    "иманалы айдарбеков 173": (42.9287, 74.5712),
+    "айдарбеков 173": (42.9287, 74.5712),
+    "иманали айдарбеков 173": (42.9287, 74.5712),
+    "киевская 199": (42.8753, 74.5908),
+    "ул киевская 199": (42.8753, 74.5908),
 }
 
 def load_orders():
@@ -43,17 +52,26 @@ def get_coords_2gis(addr):
     if not DGIS_KEY: return None
     try:
         q = urllib.parse.quote(f"{addr}, Бишкек")
-        for typ in ["geocode", "items"]:
-            url = f"https://catalog.api.2gis.com/3.0/{typ}/{'geocode' if typ=='geocode' else 'items'}?q={q}&fields=items.point&key={DGIS_KEY}" if typ=="geocode" else f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}"
-            r = requests.get(url, timeout=6).json()
-            items = r.get('result', {}).get('items', [])
-            if items and items[0].get('point'):
-                return (items[0]['point']['lat'], items[0]['point']['lon'])
+        url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={q}&fields=items.point&key={DGIS_KEY}"
+        r = requests.get(url, timeout=6).json()
+        items = r.get('result', {}).get('items', [])
+        if items and items[0].get('point'):
+            return (items[0]['point']['lat'], items[0]['point']['lon'])
+        url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}"
+        r = requests.get(url, timeout=6).json()
+        items = r.get('result', {}).get('items', [])
+        if items and items[0].get('point'):
+            return (items[0]['point']['lat'], items[0]['point']['lon'])
     except: pass
     return None
 
 def get_coords(addr):
-    low = addr.lower()
+    low = addr.lower().strip()
+    # Сначала точные координаты из твоих ошибок
+    for k, (lat, lon) in MANUAL_COORDS.items():
+        if k in low:
+            return (lat, lon)
+    # Потом замена названий магазинов
     for k, v in MANUAL.items():
         if k in low:
             addr = v; break
@@ -87,47 +105,33 @@ def order_kb(oid, phone, dest):
     mk.add(types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{oid}"))
     return mk
 
-# УМНЫЙ ПАРСЕР - РЕШАЕТ ТВОЙ БАГ СО СКРИНА
+# УМНЫЙ ПАРСЕР - чинит 1990550997099 -> 199 + 0550997099
 def parse_order(text):
     t = text.strip()
     nospace = re.sub(r'\s+', '', t)
     phone = ""
-    # ищем все 0 + 9 цифр с конца
     matches = list(re.finditer(r'0\d{9}', nospace))
     if matches:
-        phone = matches[-1].group()  # 0550997099
-        # Удаляем телефон из оригинала, оставляем дом
-        # Работает и для "1990550997099" -> "199"
-        dest = t
-        # Удаляем телефон и все что с ним слиплось в конце
-        # Сначала пробуем убрать телефон как подстроку
+        phone = matches[-1].group()
         if phone in t:
             dest = t.replace(phone, '')
         else:
-            # Для слитного случая 1990550997099
-            dest = re.sub(r'0\d{9}$', '', nospace)
-            # Если dest только цифры дома + буквы улицы без пробела
-            # Пытаемся вернуть улицу
-            # Пример nospace=УлицаКиевская1990550997099 -> dest=УлицаКиевская199
-            # Добавим пробел перед домом
+            dest = nospace.replace(phone, '')
             dest = re.sub(r'([а-яА-Я]+)(\d+)$', r'\1 \2', dest)
         dest = dest.strip(' -:,')
     else:
         dest = t
-    
     dest = re.sub(r'\s+', ' ', dest).strip()
-    # Убираем мусор если остался
-    dest = re.sub(r'^\d+\s+', '', dest) if len(dest.split())==1 and dest.isdigit() else dest
-    if not dest:
-        dest = "Адрес уточнить"
+    dest = re.sub(r'0\d{9}', '', dest).strip()
+    if not dest: dest = "Адрес уточнить"
     return dest, phone
 
 @bot.message_handler(commands=['start'])
 def start(m):
     bot.send_message(m.chat.id,
-        "🚚 *Bagyt Express Бишкек*\n\n"
-        "/start - меню\n/orders - активные\n/map - ОБЩАЯ КАРТА\n/history - история\n\n"
-        "Пиши: _Адрес Телефон_\n`Киевская 199 0550997099`\n`Иманалы Айдарбеков 173 0550997099`",
+        "🚚 *Bagyt Express Бишкек v20*\n\n"
+        "/start - меню\n/orders - активные\n/map - карта 3 заказов\n/history - история\n\n"
+        "Пиши: _Адрес Телефон_\n`Киевская 199 0550997099`",
         parse_mode='Markdown')
 
 @bot.message_handler(commands=['orders'])
@@ -152,7 +156,7 @@ def history(m):
 def map_view(m):
     active = [o for o in active_orders if o.get('status') != '✅ Доставлено' and o.get('coords')]
     if not active:
-        bot.send_message(m.chat.id, "📭 Нет точек")
+        bot.send_message(m.chat.id, "📭 Нет точек. Создай: Иманалы Айдарбеков 173 0550997099")
         return
     lats = [o['coords'][0] for o in active]
     lons = [o['coords'][1] for o in active]
@@ -163,15 +167,16 @@ def map_view(m):
     try:
         bot.send_photo(m.chat.id, map_url, caption=f"🗺 Bagyt: {len(active)} заказов")
     except:
-        bot.send_message(m.chat.id, f"🗺 Заказов: {len(active)}")
-    if len(active) >= 1:
-        dirs = "/".join([f"{lat},{lon}" for lat, lon in zip(lats,lons)])
-        gmaps = f"https://www.google.com/maps/dir/{dirs}/"
-        mk = types.InlineKeyboardMarkup()
-        mk.add(types.InlineKeyboardButton(f"🚀 Маршрут по {len(active)} точкам", url=gmaps))
-        bot.send_message(m.chat.id, "Построить маршрут:", reply_markup=mk)
+        bot.send_message(m.chat.id, f"🗺 На карте {len(active)} заказов:\n" + "\n".join([f"{i+1}. {o['dest']}" for i,o in enumerate(active)]))
+    dirs = "/".join([f"{lat},{lon}" for lat, lon in zip(lats,lons)])
+    gmaps = f"https://www.google.com/maps/dir/{dirs}/"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton(f"🚀 Маршрут по {len(active)} точкам", url=gmaps))
+    bot.send_message(m.chat.id, f"Заказов: {len(active)}\nПостроить маршрут:", reply_markup=mk)
     for o in active:
-        try: bot.send_location(m.chat.id, o['coords'][0], o['coords'][1])
+        try:
+            bot.send_location(m.chat.id, o['coords'][0], o['coords'][1])
+            bot.send_message(m.chat.id, f"📦 {o['dest']}")
         except: pass
 
 @bot.callback_query_handler(func=lambda c: True)
