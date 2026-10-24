@@ -10,7 +10,7 @@ DGIS_KEY = os.environ.get("DGIS_KEY", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-bishkek-final-v18")
+geolocator = Nominatim(user_agent="bagyt-bishkek-v19-final")
 
 FILE = "orders.json"
 active_orders = []
@@ -43,16 +43,12 @@ def get_coords_2gis(addr):
     if not DGIS_KEY: return None
     try:
         q = urllib.parse.quote(f"{addr}, Бишкек")
-        url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={q}&fields=items.point&key={DGIS_KEY}"
-        r = requests.get(url, timeout=6).json()
-        items = r.get('result', {}).get('items', [])
-        if items and items[0].get('point'):
-            return (items[0]['point']['lat'], items[0]['point']['lon'])
-        url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}"
-        r = requests.get(url, timeout=6).json()
-        items = r.get('result', {}).get('items', [])
-        if items and items[0].get('point'):
-            return (items[0]['point']['lat'], items[0]['point']['lon'])
+        for typ in ["geocode", "items"]:
+            url = f"https://catalog.api.2gis.com/3.0/{typ}/{'geocode' if typ=='geocode' else 'items'}?q={q}&fields=items.point&key={DGIS_KEY}" if typ=="geocode" else f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}"
+            r = requests.get(url, timeout=6).json()
+            items = r.get('result', {}).get('items', [])
+            if items and items[0].get('point'):
+                return (items[0]['point']['lat'], items[0]['point']['lon'])
     except: pass
     return None
 
@@ -91,32 +87,64 @@ def order_kb(oid, phone, dest):
     mk.add(types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{oid}"))
     return mk
 
+# УМНЫЙ ПАРСЕР - РЕШАЕТ ТВОЙ БАГ СО СКРИНА
+def parse_order(text):
+    t = text.strip()
+    nospace = re.sub(r'\s+', '', t)
+    phone = ""
+    # ищем все 0 + 9 цифр с конца
+    matches = list(re.finditer(r'0\d{9}', nospace))
+    if matches:
+        phone = matches[-1].group()  # 0550997099
+        # Удаляем телефон из оригинала, оставляем дом
+        # Работает и для "1990550997099" -> "199"
+        dest = t
+        # Удаляем телефон и все что с ним слиплось в конце
+        # Сначала пробуем убрать телефон как подстроку
+        if phone in t:
+            dest = t.replace(phone, '')
+        else:
+            # Для слитного случая 1990550997099
+            dest = re.sub(r'0\d{9}$', '', nospace)
+            # Если dest только цифры дома + буквы улицы без пробела
+            # Пытаемся вернуть улицу
+            # Пример nospace=УлицаКиевская1990550997099 -> dest=УлицаКиевская199
+            # Добавим пробел перед домом
+            dest = re.sub(r'([а-яА-Я]+)(\d+)$', r'\1 \2', dest)
+        dest = dest.strip(' -:,')
+    else:
+        dest = t
+    
+    dest = re.sub(r'\s+', ' ', dest).strip()
+    # Убираем мусор если остался
+    dest = re.sub(r'^\d+\s+', '', dest) if len(dest.split())==1 and dest.isdigit() else dest
+    if not dest:
+        dest = "Адрес уточнить"
+    return dest, phone
+
 @bot.message_handler(commands=['start'])
 def start(m):
     bot.send_message(m.chat.id,
         "🚚 *Bagyt Express Бишкек*\n\n"
-        "/start - меню\n"
-        "/orders - активные\n"
-        "/map - ОБЩАЯ КАРТА всех заказов\n"
-        "/history - история\n\n"
-        "Пиши: _Адрес Телефон_\nПример: `Мир обуви 0550997099`",
+        "/start - меню\n/orders - активные\n/map - ОБЩАЯ КАРТА\n/history - история\n\n"
+        "Пиши: _Адрес Телефон_\n`Киевская 199 0550997099`\n`Иманалы Айдарбеков 173 0550997099`",
         parse_mode='Markdown')
 
 @bot.message_handler(commands=['orders'])
 def list_orders(m):
     active = [o for o in active_orders if o.get('status') != '✅ Доставлено']
     if not active:
-        bot.send_message(m.chat.id, "📭 Нет активных заказов")
+        bot.send_message(m.chat.id, "📭 Нет активных")
         return
     txt = f"📦 Активных: {len(active)}\n\n"
     for o in active[-15:]:
-        txt += f"{o.get('status','🆕 Принят')}\n📍 {o['dest']} | {o['phone']} ID:{o['id'][:6]}\n---\n"
+        txt += f"{o.get('status','🆕')}\n📍 {o['dest']}\n📞 {o['phone']} ID:{o['id'][:6]}\n---\n"
     bot.send_message(m.chat.id, txt)
 
 @bot.message_handler(commands=['history'])
 def history(m):
     done = [o for o in active_orders if o.get('status') == '✅ Доставлено']
-    txt = f"📊 Доставлено сегодня: {len(done)}\nВсего: {len(active_orders)}\n\n"
+    txt = f"📊 Доставлено: {len(done)} Всего: {len(active_orders)}\n\n"
     for o in done[-10:]: txt += f"✅ {o['dest']}\n"
     bot.send_message(m.chat.id, txt)
 
@@ -124,9 +152,8 @@ def history(m):
 def map_view(m):
     active = [o for o in active_orders if o.get('status') != '✅ Доставлено' and o.get('coords')]
     if not active:
-        bot.send_message(m.chat.id, "📭 Нет точек. Создай: Эмгекчил-7 0554050070")
+        bot.send_message(m.chat.id, "📭 Нет точек")
         return
-    # 1 ОБЩАЯ КАРТА - решает твою проблему
     lats = [o['coords'][0] for o in active]
     lons = [o['coords'][1] for o in active]
     center_lat = sum(lats)/len(lats)
@@ -134,22 +161,17 @@ def map_view(m):
     markers = "&".join([f"markers={lat},{lon},red" for lat, lon in zip(lats,lons)])
     map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={center_lat},{center_lon}&zoom=13&size=800x600&{markers}"
     try:
-        bot.send_photo(m.chat.id, map_url, caption=f"🗺 Bagyt: {len(active)} заказов на одной карте")
+        bot.send_photo(m.chat.id, map_url, caption=f"🗺 Bagyt: {len(active)} заказов")
     except:
-        bot.send_message(m.chat.id, f"🗺 На карте {len(active)} заказов")
-
-    # Ссылка на маршрут по всем точкам
+        bot.send_message(m.chat.id, f"🗺 Заказов: {len(active)}")
     if len(active) >= 1:
         dirs = "/".join([f"{lat},{lon}" for lat, lon in zip(lats,lons)])
         gmaps = f"https://www.google.com/maps/dir/{dirs}/"
         mk = types.InlineKeyboardMarkup()
         mk.add(types.InlineKeyboardButton(f"🚀 Маршрут по {len(active)} точкам", url=gmaps))
-        bot.send_message(m.chat.id, "Нажми чтобы построить оптимальный маршрут:", reply_markup=mk)
-    
-    # И по одной для схемы проезда как на твоем скрине
+        bot.send_message(m.chat.id, "Построить маршрут:", reply_markup=mk)
     for o in active:
-        try:
-            bot.send_location(m.chat.id, o['coords'][0], o['coords'][1])
+        try: bot.send_location(m.chat.id, o['coords'][0], o['coords'][1])
         except: pass
 
 @bot.callback_query_handler(func=lambda c: True)
@@ -161,9 +183,8 @@ def callbacks(c):
         if action == "go":
             order['status'] = "🚀 В пути"; order['notified']=True; save_orders()
             bot.answer_callback_query(c.id, "В пути!")
-            bot.send_message(order['chat_id'], f"🚀 Курьер выехал!\n📍 {order['dest']}")
         elif action == "done":
-            order['status'] = "✅ Доставлено"; order['done_at']=str(datetime.datetime.now()); save_orders()
+            order['status'] = "✅ Доставлено"; save_orders()
             bot.answer_callback_query(c.id, "Доставлено!")
             bot.edit_message_text(f"✅ ДОСТАВЛЕНО\n📦 {order['dest']}", c.message.chat.id, c.message.message_id)
         elif action == "cancel":
@@ -174,7 +195,6 @@ def callbacks(c):
 
 @bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
-    couriers.add(m.chat.id)
     if not m.location: return
     cur = (m.location.latitude, m.location.longitude)
     for o in active_orders:
@@ -183,7 +203,6 @@ def handle_loc(m):
             dist = geodesic(cur, o['coords']).km
             if dist < 1.5:
                 mk = order_kb(o['id'], o['phone'], o['dest'])
-                bot.send_message(o['chat_id'], f"⏰ Курьер в {dist:.2f} км!\n📍 {o['dest']}", reply_markup=mk)
                 bot.send_message(m.chat.id, f"Ты рядом {dist:.2f} км: {o['dest']}", reply_markup=mk)
                 o['notified']=True; save_orders()
         except: pass
@@ -194,9 +213,7 @@ def handle_text(m):
     txt = m.text.strip()
     tmp = bot.send_message(m.chat.id, f"⏳ Ищу: {txt[:40]}...")
     def work():
-        ph = re.search(r'(\+?996|0)?\s*\d{3}\s*\d{3}\s*\d{3,4}', txt)
-        phone = ph.group() if ph else ""
-        dest = txt.replace(phone, '').strip(' -:,') if ph else txt
+        dest, phone = parse_order(txt)
         coords = get_coords(dest)
         oid = str(uuid.uuid4())
         order = {'id': oid, 'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False, 'status': '🆕 Принят'}
