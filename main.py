@@ -2,7 +2,6 @@ import os, threading, urllib.parse, re, requests, uuid, json
 import telebot
 from flask import Flask
 from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -10,40 +9,49 @@ DGIS_KEY = os.environ.get("DGIS_KEY", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-yandex-v24")
+geolocator = Nominatim(user_agent="bagyt-v25-final")
 
 FILE = "orders.json"
+MANUAL_FILE = "manual_points.json"
 active_orders = []
 
-# ПРЯМО НА ДОМ - ЗАПОМНИЛ
+# БАЗОВЫЕ ТОЧКИ - если забудет, есть отсюда
 MANUAL_COORDS = {
-    "иманалы айдарбеков 173": (42.9272, 74.5718),
-    "айдарбеков 173": (42.9272, 74.5718),
-    "киевская 199": (42.8753, 74.5908),
-    "ибраимова 115": (42.8759, 74.6123),
-    "эмгекчил 7": (42.9450, 74.6010),
+    "иманалы айдарбеков 173": (42.88532, 74.57515),
+    "айдарбеков 173": (42.88532, 74.57515),
+    "молодой гвардии 173": (42.88532, 74.57515),
 }
 
-MANUAL = {
-    "биримдик кут": "Максима Горького 1",
-    "мир обуви": "Дордой 14",
-}
-
-def load_orders():
+def load_json(path):
     try:
-        if os.path.exists(FILE):
-            with open(FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(path):
+            with open(path,'r',encoding='utf-8') as f:
                 return json.load(f)
     except: pass
     return []
 
-def save_orders():
+def save_json(path, data):
     try:
-        with open(FILE, 'w', encoding='utf-8') as f:
-            json.dump(active_orders, f, ensure_ascii=False)
+        with open(path,'w',encoding='utf-8') as f:
+            json.dump(data,f,ensure_ascii=False,indent=2)
     except: pass
 
+def load_orders():
+    data = load_json(FILE)
+    return data if isinstance(data, list) else []
+
+def save_orders():
+    save_json(FILE, active_orders)
+
+def load_manual():
+    data = load_json(MANUAL_FILE)
+    return data if isinstance(data, dict) else {}
+
+def save_manual(d):
+    save_json(MANUAL_FILE, d)
+
 active_orders = load_orders()
+manual_db = load_manual()
 
 def get_coords_2gis(addr):
     if not DGIS_KEY: return None
@@ -59,16 +67,19 @@ def get_coords_2gis(addr):
 
 def get_coords(addr):
     low = addr.lower().strip()
-    for k, (lat, lon) in MANUAL_COORDS.items():
+    # 1. Твои наученные точки
+    for k,v in manual_db.items():
         if k in low:
-            return (lat, lon)
-    for k, v in MANUAL.items():
+            return tuple(v)
+    # 2. Базовые
+    for k,v in MANUAL_COORDS.items():
         if k in low:
-            addr = v; break
-    clean = re.sub(r'(кв\.?|квартира)\s*\.?\s*\d+.*', '', addr, flags=re.I).strip()
-    c = get_coords_2gis(clean)
+            return v
+    # 3. 2ГИС / OSM
+    c = get_coords_2gis(addr)
     if c: return c
     try:
+        clean = re.sub(r'(кв\.?|квартира)\s*\.?\s*\d+.*', '', addr, flags=re.I).strip()
         loc = geolocator.geocode(f"{clean}, Бишкек, Кыргызстан", timeout=10)
         if loc: return (loc.latitude, loc.longitude)
     except: pass
@@ -139,11 +150,11 @@ def show_map(uid):
     return html
 
 @app.route('/')
-def home(): return f"BAGYT YANDEX 50 {len(active_orders)}"
+def home(): return f"BAGYT V25 {len(active_orders)} домов запомнил {len(manual_db)}"
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🚚 *Bagyt v24 Яндекс*\nДо 50 точек прямо на дом\nПиши: Адрес Телефон", parse_mode='Markdown')
+    bot.send_message(m.chat.id, "🚚 *Bagyt v25*\nДо 50 точек прямо на дом\n1. Пиши: Адрес Телефон\n2. Если точка не верная - кинь локацию с подписью адреса и я запомню навсегда\n\nКоманды: /map /points /fix", parse_mode='Markdown')
 
 @bot.message_handler(commands=['map'])
 def map_view(m):
@@ -155,7 +166,7 @@ def map_view(m):
     if not base:
         base = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME','')}"
     if not base or base=="https://":
-        base = "https://bagyt.onrender.com"
+        base = "https://bagyt-curier-bot.onrender.com"
     link = f"{base}/m/{m.chat.id}"
     txt = f"🗺 Яндекс: {len(active)} домов - точки прямо на домах\n\n"
     for i,o in enumerate(active):
@@ -168,6 +179,30 @@ def map_view(m):
         ya_route = f"https://yandex.ru/maps/?rtext={rtext}&rtt=auto"
         mk.add(types.InlineKeyboardButton(f"🚀 Яндекс маршрут {i+1}-{i+len(chunk)}", url=ya_route))
     bot.send_message(m.chat.id, txt, reply_markup=mk)
+
+@bot.message_handler(commands=['points'])
+def show_points(m):
+    if not manual_db:
+        bot.send_message(m.chat.id, "Пока нет запомненных домов. Кинь локацию с подписью адреса.")
+        return
+    txt = "📚 Запомнил домов:\n"
+    for k,v in manual_db.items():
+        txt+=f"{k} -> {v[0]},{v[1]}\n"
+    bot.send_message(m.chat.id, txt)
+
+@bot.message_handler(commands=['fix'])
+def fix_coords(m):
+    cnt=0
+    for o in active_orders:
+        if str(o.get('chat_id'))!=str(m.chat.id): continue
+        low=o['dest'].lower()
+        for k,v in {**MANUAL_COORDS, **{k:tuple(v) for k,v in manual_db.items()}}.items():
+            if k in low:
+                o['coords']=v
+                cnt+=1
+                break
+    save_orders()
+    bot.send_message(m.chat.id, f"✅ Исправил {cnt} точек. Жми /map")
 
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(c):
@@ -186,6 +221,28 @@ def callbacks(c):
             bot.answer_callback_query(c.id, "Отменен")
     except: pass
 
+@bot.message_handler(content_types=['location'])
+def learn_point(m):
+    if not m.location: return
+    lat = m.location.latitude
+    lon = m.location.longitude
+    caption = (m.caption or "").strip()
+    if caption:
+        key = caption.lower()
+        manual_db[key] = [lat, lon]
+        save_manual(manual_db)
+        # переставить все такие заказы
+        fixed=0
+        for o in active_orders:
+            if key in o['dest'].lower():
+                o['coords']=(lat,lon)
+                fixed+=1
+        save_orders()
+        bot.send_message(m.chat.id, f"✅ Запомнил навсегда: {caption}\n📍 {lat},{lon}\nИсправил {fixed} заказов. Теперь /map будет точно на дом.")
+    else:
+        # просто рядом - не учим, только показываем ближайший
+        bot.send_message(m.chat.id, f"📍 Ты кинул точку {lat},{lon}\nЧтобы я запомнил дом навсегда, отправь локацию с ПОДПИСЬЮ адреса.\nПример: отправь локацию и в подписи напиши: Иманалы Айдарбеков 173")
+
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
     if not m.text or m.text.startswith('/'): return
@@ -198,7 +255,7 @@ def handle_text(m):
         order = {'id': oid, 'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False, 'status': '🆕'}
         active_orders.append(order); save_orders()
         mk = order_kb(oid, phone, dest)
-        res = f"✅ Принято прямо на дом\n📦 {dest}\n{'📞 '+phone if phone else ''}\n{'📍 Дом найден ✅' if coords else '📍'}\nID:{oid[:6]}"
+        res = f"✅ Принято прямо на дом\n📦 {dest}\n{'📞 '+phone if phone else ''}\n{'📍 Дом найден ✅' if coords else '📍 Адрес принял'}\nID:{oid[:6]}"
         try: bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=mk)
         except: bot.send_message(m.chat.id, res, reply_markup=mk)
     threading.Thread(target=work, daemon=True).start()
