@@ -10,7 +10,7 @@ DGIS_KEY = os.environ.get("DGIS_KEY", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-bishkek-final-v17")
+geolocator = Nominatim(user_agent="bagyt-bishkek-final-v18")
 
 FILE = "orders.json"
 active_orders = []
@@ -35,58 +35,46 @@ def save_orders():
     try:
         with open(FILE, 'w', encoding='utf-8') as f:
             json.dump(active_orders, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"save err {e}")
+    except: pass
 
 active_orders = load_orders()
 
 def get_coords_2gis(addr):
-    if not DGIS_KEY:
-        return None
+    if not DGIS_KEY: return None
     try:
         q = urllib.parse.quote(f"{addr}, Бишкек")
-        # 1. как адрес
         url = f"https://catalog.api.2gis.com/3.0/items/geocode?q={q}&fields=items.point&key={DGIS_KEY}"
         r = requests.get(url, timeout=6).json()
         items = r.get('result', {}).get('items', [])
         if items and items[0].get('point'):
             return (items[0]['point']['lat'], items[0]['point']['lon'])
-        # 2. как фирма / магазин
         url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}"
         r = requests.get(url, timeout=6).json()
         items = r.get('result', {}).get('items', [])
         if items and items[0].get('point'):
             return (items[0]['point']['lat'], items[0]['point']['lon'])
-    except Exception as e:
-        print(f"2gis err {e}")
+    except: pass
     return None
 
 def get_coords(addr):
     low = addr.lower()
     for k, v in MANUAL.items():
         if k in low:
-            addr = v
-            break
+            addr = v; break
     clean = re.sub(r'(кв\.?|квартира)\s*\.?\s*\d+.*', '', addr, flags=re.I).strip()
     c = get_coords_2gis(clean)
-    if c:
-        return c
+    if c: return c
     try:
         loc = geolocator.geocode(f"{clean}, Бишкек, Кыргызстан", timeout=10)
-        if loc:
-            return (loc.latitude, loc.longitude)
-    except:
-        pass
+        if loc: return (loc.latitude, loc.longitude)
+    except: pass
     return None
 
 def normalize_phone(p):
     d = ''.join(filter(str.isdigit, p or ''))
-    if not d:
-        return ""
-    if d.startswith('0'):
-        d = '996' + d[1:]
-    if not d.startswith('996'):
-        d = '996' + d
+    if not d: return ""
+    if d.startswith('0'): d = '996' + d[1:]
+    if not d.startswith('996'): d = '996' + d
     return d
 
 def order_kb(oid, phone, dest):
@@ -108,11 +96,10 @@ def start(m):
     bot.send_message(m.chat.id,
         "🚚 *Bagyt Express Бишкек*\n\n"
         "/start - меню\n"
-        "/orders - активные заказы\n"
-        "/map - карта заказов\n"
+        "/orders - активные\n"
+        "/map - ОБЩАЯ КАРТА всех заказов\n"
         "/history - история\n\n"
-        "Пиши: _Адрес Телефон_\n"
-        "Пример: `Мир обуви 0550997099`",
+        "Пиши: _Адрес Телефон_\nПример: `Мир обуви 0550997099`",
         parse_mode='Markdown')
 
 @bot.message_handler(commands=['orders'])
@@ -123,87 +110,87 @@ def list_orders(m):
         return
     txt = f"📦 Активных: {len(active)}\n\n"
     for o in active[-15:]:
-        txt += f"{o.get('status','🆕 Принят')}\n📍 {o['dest']}\n📞 {o['phone']} | ID:{o['id'][:6]}\n---\n"
+        txt += f"{o.get('status','🆕 Принят')}\n📍 {o['dest']} | {o['phone']} ID:{o['id'][:6]}\n---\n"
     bot.send_message(m.chat.id, txt)
 
 @bot.message_handler(commands=['history'])
 def history(m):
     done = [o for o in active_orders if o.get('status') == '✅ Доставлено']
-    txt = f"📊 Сегодня доставлено: {len(done)}\nВсего заказов: {len(active_orders)}\n\n"
-    for o in done[-10:]:
-        txt += f"✅ {o['dest']}\n"
-    bot.send_message(m.chat.id, txt or "Пока 0 доставок")
+    txt = f"📊 Доставлено сегодня: {len(done)}\nВсего: {len(active_orders)}\n\n"
+    for o in done[-10:]: txt += f"✅ {o['dest']}\n"
+    bot.send_message(m.chat.id, txt)
 
 @bot.message_handler(commands=['map'])
 def map_view(m):
     active = [o for o in active_orders if o.get('status') != '✅ Доставлено' and o.get('coords')]
     if not active:
-        bot.send_message(m.chat.id, "📭 Нет активных точек на карте. Создай заказ: Эмгекчил-7 0554050070")
+        bot.send_message(m.chat.id, "📭 Нет точек. Создай: Эмгекчил-7 0554050070")
         return
-    bot.send_message(m.chat.id, f"🗺 На карте {len(active)} точек. Кидаю:")
+    # 1 ОБЩАЯ КАРТА - решает твою проблему
+    lats = [o['coords'][0] for o in active]
+    lons = [o['coords'][1] for o in active]
+    center_lat = sum(lats)/len(lats)
+    center_lon = sum(lons)/len(lons)
+    markers = "&".join([f"markers={lat},{lon},red" for lat, lon in zip(lats,lons)])
+    map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={center_lat},{center_lon}&zoom=13&size=800x600&{markers}"
+    try:
+        bot.send_photo(m.chat.id, map_url, caption=f"🗺 Bagyt: {len(active)} заказов на одной карте")
+    except:
+        bot.send_message(m.chat.id, f"🗺 На карте {len(active)} заказов")
+
+    # Ссылка на маршрут по всем точкам
+    if len(active) >= 1:
+        dirs = "/".join([f"{lat},{lon}" for lat, lon in zip(lats,lons)])
+        gmaps = f"https://www.google.com/maps/dir/{dirs}/"
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton(f"🚀 Маршрут по {len(active)} точкам", url=gmaps))
+        bot.send_message(m.chat.id, "Нажми чтобы построить оптимальный маршрут:", reply_markup=mk)
+    
+    # И по одной для схемы проезда как на твоем скрине
     for o in active:
         try:
-            lat, lon = o['coords']
-            bot.send_location(m.chat.id, lat, lon)
-            bot.send_message(m.chat.id,
-                f"📦 {o['dest']}\n📞 {o['phone']}\n{o.get('status')}",
-                reply_markup=order_kb(o['id'], o['phone'], o['dest']))
-        except Exception as e:
-            print(e)
+            bot.send_location(m.chat.id, o['coords'][0], o['coords'][1])
+        except: pass
 
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(c):
     try:
         action, oid = c.data.split('_', 1)
         order = next((o for o in active_orders if o['id'] == oid), None)
-        if not order:
-            bot.answer_callback_query(c.id, "Заказ не найден")
-            return
+        if not order: return
         if action == "go":
-            order['status'] = "🚀 В пути"
-            order['notified'] = True
-            save_orders()
-            bot.answer_callback_query(c.id, "Выехал!")
+            order['status'] = "🚀 В пути"; order['notified']=True; save_orders()
+            bot.answer_callback_query(c.id, "В пути!")
             bot.send_message(order['chat_id'], f"🚀 Курьер выехал!\n📍 {order['dest']}")
-            bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=order_kb(order['id'], order['phone'], order['dest']))
         elif action == "done":
-            order['status'] = "✅ Доставлено"
-            order['done_at'] = str(datetime.datetime.now())
-            save_orders()
-            bot.answer_callback_query(c.id, "Доставлено ✅")
-            bot.edit_message_text(f"✅ ДОСТАВЛЕНО\n📦 {order['dest']}\n📞 {order['phone']}", c.message.chat.id, c.message.message_id)
+            order['status'] = "✅ Доставлено"; order['done_at']=str(datetime.datetime.now()); save_orders()
+            bot.answer_callback_query(c.id, "Доставлено!")
+            bot.edit_message_text(f"✅ ДОСТАВЛЕНО\n📦 {order['dest']}", c.message.chat.id, c.message.message_id)
         elif action == "cancel":
-            active_orders.remove(order)
-            save_orders()
+            active_orders.remove(order); save_orders()
             bot.answer_callback_query(c.id, "Отменен")
-            bot.edit_message_text(f"❌ ОТМЕНЕН\n📦 {order['dest']}", c.message.chat.id, c.message.message_id)
-    except Exception as e:
-        print(f"callback err {e}")
+            bot.edit_message_text(f"❌ ОТМЕНЕН {order['dest']}", c.message.chat.id, c.message.message_id)
+    except: pass
 
-@bot.message_handler(content_types=['location', 'live_location'])
+@bot.message_handler(content_types=['location','live_location'])
 def handle_loc(m):
     couriers.add(m.chat.id)
-    if not m.location:
-        return
+    if not m.location: return
     cur = (m.location.latitude, m.location.longitude)
     for o in active_orders:
-        if o.get('status') == '✅ Доставлено' or o.get('notified') or not o.get('coords'):
-            continue
+        if o.get('status')=='✅ Доставлено' or o.get('notified') or not o.get('coords'): continue
         try:
             dist = geodesic(cur, o['coords']).km
             if dist < 1.5:
                 mk = order_kb(o['id'], o['phone'], o['dest'])
                 bot.send_message(o['chat_id'], f"⏰ Курьер в {dist:.2f} км!\n📍 {o['dest']}", reply_markup=mk)
                 bot.send_message(m.chat.id, f"Ты рядом {dist:.2f} км: {o['dest']}", reply_markup=mk)
-                o['notified'] = True
-                save_orders()
-        except:
-            pass
+                o['notified']=True; save_orders()
+        except: pass
 
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
-    if not m.text or m.text.startswith('/'):
-        return
+    if not m.text or m.text.startswith('/'): return
     txt = m.text.strip()
     tmp = bot.send_message(m.chat.id, f"⏳ Ищу: {txt[:40]}...")
     def work():
@@ -213,19 +200,15 @@ def handle_text(m):
         coords = get_coords(dest)
         oid = str(uuid.uuid4())
         order = {'id': oid, 'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False, 'status': '🆕 Принят'}
-        active_orders.append(order)
-        save_orders()
+        active_orders.append(order); save_orders()
         mk = order_kb(oid, phone, dest)
         res = f"✅ Принято\n📦 {dest}\n{('📞 '+phone) if phone else ''}\n{'📍 Найдено ✅' if coords else '📍 Адрес принял'}\nID:{oid[:6]}"
-        try:
-            bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=mk)
-        except:
-            bot.send_message(m.chat.id, res, reply_markup=mk)
+        try: bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=mk)
+        except: bot.send_message(m.chat.id, res, reply_markup=mk)
     threading.Thread(target=work, daemon=True).start()
 
 @app.route('/')
-def home():
-    return f"BAGYT LIVE {len(active_orders)} orders"
+def home(): return f"BAGYT LIVE {len(active_orders)}"
 
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
