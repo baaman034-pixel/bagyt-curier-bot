@@ -4,7 +4,6 @@ from flask import Flask
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# читает и DGIS_KEY и DGIS_API_KEY
 DGIS_KEY = (os.environ.get("DGIS_KEY") or os.environ.get("DGIS_API_KEY") or "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
@@ -42,30 +41,27 @@ def in_bishkek(lat, lon):
 
 def get_coords_2gis(addr):
     if not DGIS_KEY:
-        print("DGIS_KEY пустой")
+        print("DGIS_KEY EMPTY")
         return None
     try:
         q = urllib.parse.quote(addr)
-        # 1. Точный поиск дома в Бишкеке
         url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}&region_id=38"
         r = requests.get(url, timeout=8).json()
         items = r.get('result', {}).get('items', [])
         for it in items:
             p = it.get('point')
             if p and in_bishkek(p['lat'], p['lon']):
-                print(f"2GIS FOUND: {addr} -> {p}")
+                print(f"2GIS OK: {addr} -> {p}")
                 return (p['lat'], p['lon'])
-        # 2. Геокодер
         url2 = f"https://catalog.api.2gis.com/3.0/items/geocode?q={q}&fields=items.point&key={DGIS_KEY}"
         r2 = requests.get(url2, timeout=8).json()
         items2 = r2.get('result', {}).get('items', [])
         if items2 and items2[0].get('point'):
             p = items2[0]['point']
             if in_bishkek(p['lat'], p['lon']):
-                print(f"2GIS GEOCODE: {addr} -> {p}")
                 return (p['lat'], p['lon'])
     except Exception as e:
-        print(f"2GIS error: {e}")
+        print(f"2GIS err {e}")
     return None
 
 def get_coords(addr):
@@ -122,11 +118,11 @@ def show_map(uid):
     }});</script></body></html>"""
 
 @app.route('/')
-def home(): return f"BAGYT 2GIS ONLY {len(active_orders)} DGIS:{'OK' if DGIS_KEY else 'NO'}"
+def home(): return f"BAGYT 2GIS ONLY Live! Cargo:{len(active_orders)} DGIS:{'OK' if DGIS_KEY else 'NO'}"
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 *Bagyt 2GIS only*\n2ГИС: {'✅ подключен' if DGIS_KEY else '❌ нет ключа'}\nПиши: Адрес Телефон\nПример: Эмгекчил-7 5 0554050070\n\n/map - карта", parse_mode='Markdown')
+    bot.send_message(m.chat.id, f"🚚 *Bagyt v28 2GIS only*\n2ГИС: {'✅ подключен' if DGIS_KEY else '❌ нет ключа - добавь DGIS_KEY в Render'}\n\nПиши: Адрес + телефон\nПример: Эмгекчил-7 5 0554050070\n\n/map - карта", parse_mode='Markdown')
 
 @bot.message_handler(commands=['map'])
 def map_view(m):
@@ -170,19 +166,19 @@ def learn(m):
     if cap:
         manual_db[cap]=[m.location.latitude, m.location.longitude]
         save_manual()
-        bot.send_message(m.chat.id, f"✅ Запомнил {cap} навсегда через 2ГИС базу")
+        bot.send_message(m.chat.id, f"✅ Запомнил {cap} навсегда")
 
 @bot.message_handler(content_types=['text'])
 def handle(m):
     if not m.text or m.text.startswith('/'): return
-    tmp = bot.send_message(m.chat.id, "⏳ Ищу в 2ГИС до дома...")
+    tmp = bot.send_message(m.chat.id, "⏳ Ищу в 2ГИС до подъезда...")
     def work():
         dest, phone = parse_order(m.text)
         coords = get_coords(dest)
         oid = str(uuid.uuid4())[:8]
         active_orders.append({'id':oid,'dest':dest,'phone':phone,'coords':coords,'chat_id':m.chat.id,'status':'🆕'})
         save_orders()
-        res = f"{'✅ 2ГИС нашел до дома ✅' if coords else '❌ 2ГИС не нашел, добавь точкой'}: {dest}"
+        res = f"{'✅ 2ГИС нашел до дома' if coords else '❌ 2ГИС не нашел'}: {dest}"
         try: bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=order_kb(oid, phone, dest))
         except: bot.send_message(m.chat.id, res, reply_markup=order_kb(oid, phone, dest))
     threading.Thread(target=work, daemon=True).start()
