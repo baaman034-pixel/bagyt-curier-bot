@@ -1,23 +1,20 @@
 import os, threading, urllib.parse, re, requests, uuid, json
 import telebot
 from flask import Flask
-from geopy.geocoders import Nominatim
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Читает и DGIS_API_KEY как у тебя на скрине, и DGIS_KEY
-DGIS_KEY = (os.environ.get("DGIS_API_KEY") or os.environ.get("DGIS_KEY") or "").strip()
+# читает и DGIS_KEY и DGIS_API_KEY
+DGIS_KEY = (os.environ.get("DGIS_KEY") or os.environ.get("DGIS_API_KEY") or "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-v27-final")
 
 FILE = "orders.json"
 MANUAL_FILE = "manual_points.json"
 
 MANUAL_COORDS = {
     "иманалы айдарбеков 173": (42.88385, 74.57490),
-    "айдарбеков 173": (42.88385, 74.57490),
     "эмгекчил-7 5": (42.91230, 74.56450),
 }
 
@@ -37,7 +34,6 @@ def save_json(path, data):
 
 active_orders = load_json(FILE, [])
 manual_db = load_json(MANUAL_FILE, {})
-
 def save_orders(): save_json(FILE, active_orders)
 def save_manual(): save_json(MANUAL_FILE, manual_db)
 
@@ -46,26 +42,30 @@ def in_bishkek(lat, lon):
 
 def get_coords_2gis(addr):
     if not DGIS_KEY:
+        print("DGIS_KEY пустой")
         return None
     try:
         q = urllib.parse.quote(addr)
-        url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point,items.address_name&key={DGIS_KEY}&region_id=38"
-        r = requests.get(url, timeout=7).json()
+        # 1. Точный поиск дома в Бишкеке
+        url = f"https://catalog.api.2gis.com/3.0/items?q={q}&fields=items.point&key={DGIS_KEY}&region_id=38"
+        r = requests.get(url, timeout=8).json()
         items = r.get('result', {}).get('items', [])
         for it in items:
             p = it.get('point')
             if p and in_bishkek(p['lat'], p['lon']):
+                print(f"2GIS FOUND: {addr} -> {p}")
                 return (p['lat'], p['lon'])
-        # geocode fallback
+        # 2. Геокодер
         url2 = f"https://catalog.api.2gis.com/3.0/items/geocode?q={q}&fields=items.point&key={DGIS_KEY}"
-        r2 = requests.get(url2, timeout=6).json()
+        r2 = requests.get(url2, timeout=8).json()
         items2 = r2.get('result', {}).get('items', [])
         if items2 and items2[0].get('point'):
             p = items2[0]['point']
             if in_bishkek(p['lat'], p['lon']):
+                print(f"2GIS GEOCODE: {addr} -> {p}")
                 return (p['lat'], p['lon'])
     except Exception as e:
-        print(f"2GIS err {e}")
+        print(f"2GIS error: {e}")
     return None
 
 def get_coords(addr):
@@ -74,34 +74,8 @@ def get_coords(addr):
         if k in low: return tuple(v)
     for k,v in MANUAL_COORDS.items():
         if k in low: return tuple(v)
-
-    clean = re.sub(r'(?i)улица|ул\.|көчөсү|кв.*', '', addr).strip()
-
-    # 1. 2ГИС - до дома
-    c = get_coords_2gis(f"{clean}, Бишкек")
-    if c: return c
-
-    # 2. Яндекс - до дома без ключа 2ГИС
-    try:
-        q = urllib.parse.quote(f"Бишкек, {clean}")
-        url = f"https://geocode-maps.yandex.ru/1.x/?geocode={q}&format=json&results=1&lang=ru_RU"
-        r = requests.get(url, timeout=7).json()
-        pos = r['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
-        lon, lat = map(float, pos.split())
-        if in_bishkek(lat, lon):
-            return (lat, lon)
-    except: pass
-
-    # 3. OSM только Бишкек
-    try:
-        q = urllib.parse.quote(f"{clean}, Бишкек")
-        url = f"https://nominatim.openstreetmap.org/search?q={q}&format=json&limit=1&viewbox=74.30,43.05,74.95,42.70&bounded=1&countrycodes=kg"
-        r = requests.get(url, headers={"User-Agent":"bagyt-v27"}, timeout=8).json()
-        if r:
-            lat = float(r[0]['lat']); lon = float(r[0]['lon'])
-            if in_bishkek(lat, lon): return (lat, lon)
-    except: pass
-    return None
+    clean = re.sub(r'(?i)кв.*', '', addr).strip()
+    return get_coords_2gis(f"{clean}, Бишкек")
 
 def normalize_phone(p):
     d = ''.join(filter(str.isdigit, p or ''))
@@ -148,11 +122,11 @@ def show_map(uid):
     }});</script></body></html>"""
 
 @app.route('/')
-def home(): return f"BAGYT V27 {len(active_orders)} DGIS:{'OK' if DGIS_KEY else 'NO KEY'}"
+def home(): return f"BAGYT 2GIS ONLY {len(active_orders)} DGIS:{'OK' if DGIS_KEY else 'NO'}"
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, f"🚚 *Bagyt v27*\n2ГИС: {'✅ подключен' if DGIS_KEY else '❌ нет ключа'}\nПиши: Адрес Телефон\nПример: Эмгекчил-7 5 0554050070\n\n/map - карта 50 точек", parse_mode='Markdown')
+    bot.send_message(m.chat.id, f"🚚 *Bagyt 2GIS only*\n2ГИС: {'✅ подключен' if DGIS_KEY else '❌ нет ключа'}\nПиши: Адрес Телефон\nПример: Эмгекчил-7 5 0554050070\n\n/map - карта", parse_mode='Markdown')
 
 @bot.message_handler(commands=['map'])
 def map_view(m):
@@ -162,11 +136,9 @@ def map_view(m):
     base = os.environ.get("RENDER_EXTERNAL_URL","").rstrip("/") or f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME','')}"
     if not base or base=="https://": base="https://bagyt-bot.onrender.com"
     link = f"{base}/m/{m.chat.id}"
-    txt = f"🗺 {len(active)} домов в Бишкеке:\n\n" + "\n".join([f"{i+1}. {o['dest']}" for i,o in enumerate(active)])
+    txt = f"🗺 {len(active)} домов (2ГИС):\n\n" + "\n".join([f"{i+1}. {o['dest']}" for i,o in enumerate(active)])
     mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("🔍 ОТКРЫТЬ ЯНДЕКС КАРТУ", url=link))
-    rtext = "~".join([f"{o['coords'][0]},{o['coords'][1]}" for o in active[:10]])
-    mk.add(types.InlineKeyboardButton(f"🚀 Маршрут {len(active[:10])} точек", url=f"https://yandex.ru/maps/?rtext={rtext}&rtt=auto"))
+    mk.add(types.InlineKeyboardButton("🔍 ОТКРЫТЬ КАРТУ", url=link))
     bot.send_message(m.chat.id, txt, reply_markup=mk)
 
 @bot.message_handler(commands=['fix'])
@@ -175,10 +147,9 @@ def fix_cmd(m):
     for o in active_orders:
         if str(o.get('chat_id'))!=str(m.chat.id): continue
         nc = get_coords(o['dest'])
-        if nc and in_bishkek(nc[0], nc[1]):
-            o['coords']=nc; cnt+=1
+        if nc: o['coords']=nc; cnt+=1
     save_orders()
-    bot.send_message(m.chat.id, f"✅ Перепроверил {cnt} адресов в Бишкеке через 2ГИС. /map")
+    bot.send_message(m.chat.id, f"✅ Перепроверил {cnt} через 2ГИС. /map")
 
 @bot.callback_query_handler(func=lambda c: True)
 def cbs(c):
@@ -199,26 +170,19 @@ def learn(m):
     if cap:
         manual_db[cap]=[m.location.latitude, m.location.longitude]
         save_manual()
-        f=0
-        for o in active_orders:
-            if cap in o['dest'].lower():
-                o['coords']=(m.location.latitude, m.location.longitude); f+=1
-        save_orders()
-        bot.send_message(m.chat.id, f"✅ Запомнил {cap} навсегда. Исправил {f} заказов.")
-    else:
-        bot.send_message(m.chat.id, "Кинь локацию с подписью адреса")
+        bot.send_message(m.chat.id, f"✅ Запомнил {cap} навсегда через 2ГИС базу")
 
 @bot.message_handler(content_types=['text'])
 def handle(m):
     if not m.text or m.text.startswith('/'): return
-    tmp = bot.send_message(m.chat.id, "⏳ Ищу в Бишкеке через 2ГИС...")
+    tmp = bot.send_message(m.chat.id, "⏳ Ищу в 2ГИС до дома...")
     def work():
         dest, phone = parse_order(m.text)
         coords = get_coords(dest)
         oid = str(uuid.uuid4())[:8]
         active_orders.append({'id':oid,'dest':dest,'phone':phone,'coords':coords,'chat_id':m.chat.id,'status':'🆕'})
         save_orders()
-        res = f"✅ {'Нашел до дома ✅' if coords else 'Принял'}: {dest}"
+        res = f"{'✅ 2ГИС нашел до дома ✅' if coords else '❌ 2ГИС не нашел, добавь точкой'}: {dest}"
         try: bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=order_kb(oid, phone, dest))
         except: bot.send_message(m.chat.id, res, reply_markup=order_kb(oid, phone, dest))
     threading.Thread(target=work, daemon=True).start()
