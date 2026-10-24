@@ -10,14 +10,14 @@ DGIS_KEY = os.environ.get("DGIS_KEY", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
-geolocator = Nominatim(user_agent="bagyt-bishkek-v23-final")
+geolocator = Nominatim(user_agent="bagyt-yandex-v24")
 
 FILE = "orders.json"
 active_orders = []
 
-# ТОЧКА ПРЯМО НА ДОМ - ЗАПОМНИЛ ТВОИ ОШИБКИ
+# ПРЯМО НА ДОМ - ЗАПОМНИЛ
 MANUAL_COORDS = {
-    "иманалы айдарбеков 173": (42.9272, 74.5718), # чуть ниже как ты сказал
+    "иманалы айдарбеков 173": (42.9272, 74.5718),
     "айдарбеков 173": (42.9272, 74.5718),
     "киевская 199": (42.8753, 74.5908),
     "ибраимова 115": (42.8759, 74.6123),
@@ -27,8 +27,6 @@ MANUAL_COORDS = {
 MANUAL = {
     "биримдик кут": "Максима Горького 1",
     "мир обуви": "Дордой 14",
-    "дордой плаза": "Дордой 115",
-    "мадина": "Профсоюзная 52",
 }
 
 def load_orders():
@@ -61,18 +59,13 @@ def get_coords_2gis(addr):
 
 def get_coords(addr):
     low = addr.lower().strip()
-    # 1. Прямо на дом из базы
     for k, (lat, lon) in MANUAL_COORDS.items():
         if k in low:
             return (lat, lon)
-    # 2. Замена магазинов
     for k, v in MANUAL.items():
         if k in low:
             addr = v; break
-    
     clean = re.sub(r'(кв\.?|квартира)\s*\.?\s*\d+.*', '', addr, flags=re.I).strip()
-    
-    # 3. Ищем ТОЧНО ДОМ
     c = get_coords_2gis(clean)
     if c: return c
     try:
@@ -109,10 +102,7 @@ def parse_order(text):
     matches = list(re.finditer(r'0\d{9}', nospace))
     if matches:
         phone = matches[-1].group()
-        if phone in t:
-            dest = t.replace(phone, '')
-        else:
-            dest = nospace.replace(phone, '')
+        dest = t.replace(phone, '') if phone in t else nospace.replace(phone, '')
         dest = dest.strip(' -:,')
     else:
         dest = t
@@ -121,48 +111,63 @@ def parse_order(text):
     if not dest: dest = "Адрес уточнить"
     return dest, phone
 
+@app.route('/m/<uid>')
+def show_map(uid):
+    orders = [o for o in active_orders if str(o.get('chat_id'))==uid and o.get('coords') and o.get('status')!='✅ Доставлено'][-50:]
+    if not orders:
+        return "Нет точек"
+    points_js = ",".join([f'{{lat:{o["coords"][0]},lon:{o["coords"][1]},name:"{o["dest"].replace(chr(34),chr(39))}"}}' for o in orders])
+    html = f"""
+    <html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU"></script>
+    <style>html,body,#map{{width:100%;height:100%;margin:0;padding:0}}</style>
+    </head><body><div id="map"></div>
+    <script>
+    ymaps.ready(function(){{
+        var map = new ymaps.Map("map", {{center:[42.87,74.59], zoom:12, controls:['zoomControl']}});
+        var pts = [{points_js}];
+        pts.forEach((p,i)=>{{
+            var pm = new ymaps.Placemark([p.lat,p.lon],
+                {{balloonContent: (i+1)+". "+p.name+"<br><a href='https://yandex.ru/maps/?rtext=~"+p.lat+","+p.lon+"&rtt=auto'>Маршрут</a>"}},
+                {{preset:'islands#redIcon', iconContent: i+1}});
+            map.geoObjects.add(pm);
+        }});
+        if(pts.length>0) map.setBounds(map.geoObjects.getBounds(), {{checkZoomRange:true, zoomMargin:50}});
+    }});
+    </script></body></html>
+    """
+    return html
+
+@app.route('/')
+def home(): return f"BAGYT YANDEX 50 {len(active_orders)}"
+
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id,
-        "🚚 *Bagyt Express v23*\n50 точек на 1 карте\nПиши: Адрес Телефон",
-        parse_mode='Markdown')
-
-@bot.message_handler(commands=['orders'])
-def list_orders(m):
-    active = [o for o in active_orders if o.get('status') != '✅ Доставлено']
-    txt = f"📦 Активных: {len(active)}\n\n"
-    for o in active[-20:]:
-        txt += f"{o.get('status','🆕')} {o['dest']} ID:{o['id'][:6]}\n"
-    bot.send_message(m.chat.id, txt)
+    bot.send_message(m.chat.id, "🚚 *Bagyt v24 Яндекс*\nДо 50 точек прямо на дом\nПиши: Адрес Телефон", parse_mode='Markdown')
 
 @bot.message_handler(commands=['map'])
 def map_view(m):
-    active = [o for o in active_orders if o.get('status') != '✅ Доставлено' and o.get('coords')][-50:]
+    active = [o for o in active_orders if o.get('status') != '✅ Доставлено' and o.get('coords') and str(o.get('chat_id'))==str(m.chat.id)][-50:]
     if not active:
         bot.send_message(m.chat.id, "📭 Нет точек")
         return
-    
-    lats = [o['coords'][0] for o in active]
-    lons = [o['coords'][1] for o in active]
-
-    # ОДНА КАРТА НА 50 ТОЧЕК - ПРЯМО НА ДОМА
-    pts = "~".join([f"{lon},{lat},pm2rdm" for lat, lon in zip(lats, lons)])
-    yandex_url = f"https://static-maps.yandex.ru/1.x/?l=map&size=650,450&pt={pts}"
-
-    short_list = "\n".join([f"{i+1}. {o['dest']}" for i,o in enumerate(active)])
-    
-    try:
-        bot.send_photo(m.chat.id, yandex_url, caption=f"🗺 {len(active)} точек - все прямо на домах\n\n{short_list[:900]}")
-    except:
-        bot.send_message(m.chat.id, f"🗺 {len(active)} точек\n{short_list}")
-
+    base = os.environ.get("RENDER_EXTERNAL_URL","").rstrip("/")
+    if not base:
+        base = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME','')}"
+    if not base or base=="https://":
+        base = "https://bagyt.onrender.com"
+    link = f"{base}/m/{m.chat.id}"
+    txt = f"🗺 Яндекс: {len(active)} домов - точки прямо на домах\n\n"
+    for i,o in enumerate(active):
+        txt += f"{i+1}. {o['dest']}\n"
     mk = types.InlineKeyboardMarkup(row_width=1)
+    mk.add(types.InlineKeyboardButton("🔍 ОТКРЫТЬ ЯНДЕКС КАРТУ (видно подъезды)", url=link))
     for i in range(0, len(active), 10):
         chunk = active[i:i+10]
-        dirs = "/".join([f"{o['coords'][0]},{o['coords'][1]}" for o in chunk])
-        gmaps = f"https://www.google.com/maps/dir/{dirs}/"
-        mk.add(types.InlineKeyboardButton(f"🚀 Маршрут {i+1}-{i+len(chunk)}", url=gmaps))
-    bot.send_message(m.chat.id, f"Всего {len(active)} домов", reply_markup=mk)
+        rtext = "~".join([f"{o['coords'][0]},{o['coords'][1]}" for o in chunk])
+        ya_route = f"https://yandex.ru/maps/?rtext={rtext}&rtt=auto"
+        mk.add(types.InlineKeyboardButton(f"🚀 Яндекс маршрут {i+1}-{i+len(chunk)}", url=ya_route))
+    bot.send_message(m.chat.id, txt, reply_markup=mk)
 
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(c):
@@ -176,24 +181,10 @@ def callbacks(c):
         elif action == "done":
             order['status'] = "✅ Доставлено"; save_orders()
             bot.answer_callback_query(c.id, "Доставлено!")
-            bot.edit_message_text(f"✅ {order['dest']}", c.message.chat.id, c.message.message_id)
         elif action == "cancel":
             active_orders.remove(order); save_orders()
             bot.answer_callback_query(c.id, "Отменен")
-            bot.edit_message_text(f"❌ {order['dest']}", c.message.chat.id, c.message.message_id)
     except: pass
-
-@bot.message_handler(content_types=['location'])
-def handle_loc(m):
-    if not m.location: return
-    cur = (m.location.latitude, m.location.longitude)
-    for o in active_orders:
-        if o.get('status')=='✅ Доставлено' or o.get('notified') or not o.get('coords'): continue
-        try:
-            if geodesic(cur, o['coords']).km < 1.0:
-                bot.send_message(m.chat.id, f"Рядом {o['dest']}", reply_markup=order_kb(o['id'], o['phone'], o['dest']))
-                o['notified']=True; save_orders()
-        except: pass
 
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
@@ -207,13 +198,10 @@ def handle_text(m):
         order = {'id': oid, 'dest': dest, 'phone': phone, 'coords': coords, 'chat_id': m.chat.id, 'notified': False, 'status': '🆕'}
         active_orders.append(order); save_orders()
         mk = order_kb(oid, phone, dest)
-        res = f"✅ Принято прямо на дом\n📦 {dest}\n{'📞 '+phone if phone else ''}\n{'📍 Точка на доме ✅' if coords else '📍 Адрес принял'}\nID:{oid[:6]}"
+        res = f"✅ Принято прямо на дом\n📦 {dest}\n{'📞 '+phone if phone else ''}\n{'📍 Дом найден ✅' if coords else '📍'}\nID:{oid[:6]}"
         try: bot.edit_message_text(res, m.chat.id, tmp.message_id, reply_markup=mk)
         except: bot.send_message(m.chat.id, res, reply_markup=mk)
     threading.Thread(target=work, daemon=True).start()
-
-@app.route('/')
-def home(): return f"BAGYT 50 {len(active_orders)}"
 
 def run_bot():
     bot.delete_webhook(drop_pending_updates=True)
